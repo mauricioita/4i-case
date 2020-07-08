@@ -1,0 +1,527 @@
+---
+title: "4i  Challenge solution"
+author:  "Maurício Itagaki"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+library(dplyr)
+library(ggplot2)
+library(forecast)
+library(lubridate)
+library(viridis)
+library(gganimate)
+library(knitr)
+library(SpatialPosition)
+library(cartography) 
+library(rgdal)
+library(networkD3) 
+library(DT)
+library(openxlsx)
+library(caTools)
+library(tidyr)
+library(zoo)
+
+
+options(scipen=999)
+```
+
+
+# CASE 1 
+
+
+```{r echo=FALSE}
+tfp_nafta <- read.csv('TFP.csv', stringsAsFactors = FALSE)
+tfp_nafta$rtfpna <- as.numeric(tfp_nafta$rtfpna)
+
+```
+
+
+###  Make an exploratory data analysis  
+
+```{r echo=FALSE, fig.width=8, warning=FALSE}
+
+for (i in unique(tfp_nafta$isocode)){
+  
+  print(paste0(i, ' Variability and Central Tendency values:'))
+  
+  print(summary(select(filter(tfp_nafta,isocode== i),rtfpna)))
+  
+  print(paste0('Standard Deviation: ', sd(tfp_nafta[tfp_nafta[,1]==i,3])))
+  
+  hist(tfp_nafta[tfp_nafta[,1]==i,3], main = paste0('Histogram of the ', i, ' TFP from 1950 to 2011'), xlab = "Total factor productivity")
+  
+}
+
+boxplot(tfp_nafta$rtfpna~isocode,data=tfp_nafta, main= "TFP variation from 1950 to 2011",
+        xlab="Country", ylab="Total factor productivity")
+
+
+tfp_nafta %>%
+  ggplot(aes(x=year, y=rtfpna, group=isocode, color=isocode)) +
+  geom_line()+
+  ggtitle('Evolution of TFP from 1950 to 2011')
+
+# preparing for average growth rate and moving average
+wide_tfp_nafta <- spread(tfp_nafta,isocode,rtfpna) %>% 
+  mutate(CAN_var = (CAN - lag(CAN) / 1) / lag(CAN) * 100,
+         MEX_var = (MEX - lag(MEX) / 1) / lag(MEX) * 100,
+         USA_var = (USA - lag(USA) / 1) / lag(USA) * 100,
+         CAN_ma = ma(CAN,order = 5),
+         MEX_ma = ma(MEX,order = 5),
+         USA_ma = ma(USA,order = 5))
+
+# average growth rate
+kable(sapply(wide_tfp_nafta[,c('CAN_var','MEX_var','USA_var')], mean, na.rm=T), caption = 'Average Growth 1950 to 2011')
+
+# filling moving average NA values
+wide_tfp_nafta[,8:10] <- replace(wide_tfp_nafta[,8:10], TRUE, lapply(wide_tfp_nafta[,8:10], na.aggregate))
+
+#plotting moving average values
+gather(wide_tfp_nafta, type, value, CAN:USA_ma, factor_key=FALSE) %>%
+  filter(type %in% c('CAN','CAN_ma','USA','USA_ma','MEX','MEX_ma')) %>% 
+  arrange(type) %>% 
+  ggplot(aes(x=year, y=value, group=type, color=type)) +
+  geom_line()+
+  ggtitle('Moving Average Along With Real TFP Values from 1950 to 2011')+
+  scale_color_brewer(palette = "Paired")
+
+# decomposing and plotting
+for (i in c(2,3,4)){
+  
+plot(stl(ts(wide_tfp_nafta[,i], frequency = 5), 'periodic'), main=paste0(colnames(wide_tfp_nafta)[i], ' Season, Trend and Irregularities 1950 to 2011'))
+
+}
+
+```
+
+
+### Forecast 10 years of the series  
+
+```{r fig.width=9, echo=FALSE}
+
+# dataframe to receive the predictions
+tfp_prediction <- setNames(data.frame(matrix(nrow = 10, ncol = 4)), c('years','USA','CAN','MEX'))
+tfp_prediction$years <- 2011:2020
+
+# predicting, plotting and 
+for (i in unique(tfp_nafta$isocode)){
+  
+  prediction <- forecast(auto.arima(tfp_nafta[tfp_nafta$isocode==i, "rtfpna"]), h = 10)
+  tfp_prediction[, i]<- prediction$mean
+  
+  plot(forecast(auto.arima(tfp_nafta[tfp_nafta$isocode==i, "rtfpna"]), h = 10), 
+       main = paste0('Forecast of the ', i, ' TFP'), xlab = 'Year', ylab="Total factor productivity", xaxt= 'n')
+  axis(1, at = 1:72, labels = 1950:2021)
+  
+}
+
+kable(tfp_prediction, caption = "Forecast of the NAFTA Countries 2011 to 2020")
+
+```
+
+
+### Can you think about another feature that could be helpful in explaining TFP series? Explain  
+
+Yes. Another important variable that may be an relevant driver to TFP (i.e could be a founder of TFP in terms of causation) is investment in R&D. That is because R&D raises rates of innovation and "enhances technology transfer by improving the ability of firms to learn about advances in the leading edge[...]" Griffith et al. (2004).   
+
+
+***
+
+
+# CASE 2   
+
+
+```{r echo=FALSE}
+
+trade_br=read.csv('data_comexstat.csv',stringsAsFactors = FALSE)
+trade_br$date <- ymd(trade_br$date)
+
+```
+
+
+### Show the evolution of total monthly and total annual exports from Brazil (all states and to everywhere) of ‘soybeans’, ‘soybean oil’ and ‘soybean meal’  
+
+```{r fig.align='center', fig.width=9, echo=FALSE}
+
+
+trade_br %>% 
+  filter(type=='Export') %>% 
+  filter(product %in% c('soybean_meal', 'soybean_oil', 'soybeans')) %>% 
+  group_by(date,product) %>% 
+  summarise(tons=sum(tons)) %>% 
+  ggplot(aes(x=date, y=tons, group=product, color=product)) +
+  geom_line()+
+  ggtitle('Monthly Evolution of Soy Products Exports from 1997 to 2019')+
+  ylab("Tons of exported products")
+
+
+
+trade_br %>% 
+  mutate(year = format(date, "%Y")) %>% 
+  filter(type=='Export') %>% 
+  filter(product %in% c('soybean_meal', 'soybean_oil', 'soybeans')) %>% 
+  group_by(year,product) %>% 
+  summarise(tons=sum(tons)) %>% 
+  ggplot(aes(x=year, y=tons, group=product, color=product)) +
+  geom_line()+
+  ggtitle('Annual Evolution of Soy Products Exports from 1997 to 2019') +
+  ylab("Tons of exported products")
+
+
+anim <- trade_br %>% 
+  mutate(year = as.numeric(format(date, "%Y"))) %>% 
+  filter(type=='Export') %>% 
+  filter(product %in% c('soybean_meal', 'soybean_oil', 'soybeans')) %>% 
+  group_by(year,product) %>% 
+  summarise(tons=sum(tons)) %>% 
+  ggplot(aes(x=year, y=tons, fill=product))+
+  geom_bar(stat="identity")+
+  labs(title = 'Evolution of Annual Soy Products Exports from 1997 to 2019')+
+  transition_time(year)+
+  ease_aes('linear')+
+  theme(legend.position = "left")+
+  shadow_mark()+
+  enter_fade()+
+  theme(legend.position = "left",panel.background = element_blank(),plot.background = element_rect(fill = "#EEF3F9"),
+        panel.grid = element_blank(), panel.grid.major.y = element_line(color="#DDD9EC"))+
+  scale_fill_manual(values = c("#FF7B80","#484848","#BCB3D9"))
+
+animate(anim, fps=19, nframes=200,type = "cairo-png",width = 1920, height= 1080,res=200,
+        antialias = "subpixel",end_pause=40, renderer = gifski_renderer())
+  
+```
+
+
+### What are the 3 most important products exported by Brazil in the last 5 years?  
+
+When considering only the USD variable, the most important products exported from 2015 to 2019 are soybeans, sugar and soybean meal.  
+
+```{r results='asis', echo=FALSE}
+export_br <- trade_br %>% 
+  mutate(year = as.numeric(format(date, "%Y"))) %>% 
+  filter(type=='Export' & year>=2015) %>%
+  group_by(product) %>% 
+  summarise(tons=sum(tons),usd=sum(usd))  
+  
+kable(arrange(export_br,desc(usd)), caption = "Exported Product's performace from 2015 to 2019")
+
+
+export_br$fraction_usd = export_br$usd / sum(export_br$usd)
+export_br$fraction_tons = export_br$tons / sum(export_br$tons)
+
+# Compute the cumulative percentages (top of each rectangle)
+export_br$ymax_usd = cumsum(export_br$fraction_usd)
+export_br$ymax_tons = cumsum(export_br$fraction_tons)
+
+# Compute the bottom of each rectangle
+export_br$ymin_usd = c(0, head(export_br$ymax_usd, n=-1))
+export_br$ymin_tons = c(0, head(export_br$ymax_tons, n=-1))
+
+
+ggplot(export_br, aes(ymax=ymax_tons, ymin=ymin_tons, xmax=4, xmin=3.1, fill=product)) +
+  geom_rect() +
+  scale_fill_brewer(palette="Set3") +
+  coord_polar(theta="y") +
+  xlim(c(2, 4)) +
+  theme_void() +
+  theme(legend.position = "right")+
+  ggtitle('Composition of Exported Products by Tons from 2015 to 2019')
+  
+
+ggplot(export_br, aes(ymax=ymax_usd, ymin=ymin_usd, xmax=4, xmin=3.1, fill=product)) +
+  geom_rect() +
+  scale_fill_brewer(palette="Set3") +
+  coord_polar(theta="y") +
+  xlim(c(2, 4)) +
+  theme_void() +
+  theme(legend.position = "right") +
+  ggtitle('Composition of Exported Products by USD from 2015 to 2019')
+
+
+
+
+```
+
+
+
+### What are the main routes through which Brazil have been exporting ‘corn’ in the last few years? Are there differences in the relative importance of routes depending on the product?  
+
+
+The main two routes for corn exportation over the past ten years have been sea and river, respectively. For the past 10 years the sea route, by far, played the most significant role for the Brazilian exports. Besides the river route for soybeans and corn, all the other routes have had an insignficant participation in delivering Brazilian products to the rest of the world.  
+
+```{r, echo=FALSE}
+
+route_corn <- trade_br %>% 
+  mutate(year = as.numeric(format(date, "%Y"))) %>% 
+  filter(product=='corn' & type=='Export' & year>=2010) %>% 
+  group_by(route) %>% 
+  summarise(tons=sum(tons))
+
+kable(arrange(route_corn,desc(tons)), caption = 'Exporting routes for corn in the last ten years')
+
+trade_br %>% 
+  mutate(year = as.numeric(format(date, "%Y"))) %>% 
+  filter(type=='Export' & year>=2010) %>% 
+  group_by(product,route) %>% 
+  summarise(tons=sum(tons)) %>% 
+  ggplot(aes(fill=route, y=tons, x=product)) + 
+  geom_bar(position="stack", stat="identity")+
+  ggtitle("Exporting Routes by product from 2010 to 2019") +
+  xlab("")+
+  scale_fill_brewer(palette='Dark2')
+
+```
+
+### Which countries have been the most important trade partners for Brazil in terms of ‘corn’ and ‘sugar’ in the last 3 years?
+
+```{r fig.width=9, warning=FALSE, echo=FALSE}
+corn <- trade_br %>%
+  mutate(year = as.numeric(format(date, "%Y"))) %>% 
+  filter(product=='corn' & year >=2017) %>% 
+  group_by(product,country) %>% 
+  summarise(tons=sum(tons)) 
+
+kable(head(arrange(corn[,2:3],desc(tons))),caption = 'Total Amount of Traded Corn From 2017 to 2019')
+
+sugar <- trade_br %>%
+  mutate(year = as.numeric(format(date, "%Y"))) %>% 
+  filter(product=='sugar' & year >=2017) %>% 
+  group_by(product,country) %>% 
+  summarise(tons=sum(tons)) 
+
+kable(head(arrange(sugar[,2:3],desc(tons))),caption = 'Total Amount of Traded Sugar From 2017 to 2019')
+
+my_spdf <- readOGR(dsn="world_shape_file/TM_WORLD_BORDERS_SIMPL-0.3.shp", verbose=FALSE) 
+
+my_spdf@data <- left_join(my_spdf@data, corn[,2:3], by=c('NAME'='country'))
+my_spdf@data <- left_join(my_spdf@data, sugar[,2:3], by=c('NAME'='country'))
+
+choroLayer(spdf = my_spdf, df = my_spdf, var = "tons.x",legend.pos = 'left',legend.title.txt = 'Tons',method = 'kmeans')
+title("Brazil's Trade Partners for Corn from 2017 to 2019")
+
+choroLayer(spdf = my_spdf, df = my_spdf, var = "tons.y",legend.pos = 'left',legend.title.txt = 'Tons',method = 'kmeans')
+title("Brazil's Trade Partners for Sugar from 2017 to 2019")
+
+```
+
+### For each of the products in the dataset, show the 5 most important states in terms of exports?  
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+
+export_top_states <- trade_br %>% 
+  filter(type=='Export') %>% 
+  group_by(product,state) %>% 
+  summarise(tons=sum(tons)) %>% 
+  top_n(n=5,tons)
+
+DT::datatable(export_top_states,caption = 'Total Amount of Traded Corn From 2017 to 2019')
+
+export_state <- trade_br %>% 
+  filter(type=='Export') %>% 
+  group_by(product,state) %>% 
+  summarise(tons=sum(tons))
+
+nodes <- data.frame(name=c(as.character(export_state$product), as.character(export_state$state)) %>% unique())
+
+export_state$product <- match(export_state$product, nodes$name)-1 
+export_state$state <-  match(export_state$state, nodes$name)-1 
+
+ColourScal ='d3.scaleOrdinal() .range(["#FDE725FF","#B4DE2CFF","#6DCD59FF","#35B779FF","#1F9E89FF","#26828EFF","#31688EFF","#3E4A89FF","#482878FF","#440154FF"])'
+
+sankeyNetwork(Links = export_state, Nodes = nodes,
+              Source = "product", Target = "state",
+              Value = "tons", NodeID = "name", 
+              sinksRight=FALSE, colourScale=ColourScal, nodeWidth=40, fontSize=13, nodePadding=20, height = 900, width = 900)
+
+
+
+
+
+```
+
+
+### What should be the total brazilian soybeans, soybean_meal, and corn export forecasts, in tons, for the next 11 years (2020-2030)?
+
+All forecasts were made using models built on multiple linear regressions in combination with ARIMA. Common Machine Learning methods have no awareness of time dimensions, that is why in this case, simply applying them would not result in a reasonable prediction as the question involve time series data. Even though it is a relatively simple model in comparison with the other models such as boosting, deep learning or even regression trees, the model have been proven a fair performance for the data provided. It is true that the predictions made present a steady growth throughout the years (except for corn and soybean meal in 2020), because the covariates provided evolve in constants rates within the period of time to be predicted. Moreover, the models are based on regression tuned by backward elimination, in other words, the independent variables present a correlation with the dependent variable, and no more than that. For further discussions, a model built on causation diagrams together with data from observational studies and reduction of biases may provide a better understanding of the Brazilian exports’ performance and, thus, a more accurate model.
+
+
+
+```{r echo=FALSE}
+# loading covariates data
+covariates <- read.xlsx('covariates.xlsx')
+
+```
+
+```{r echo=FALSE}
+############ CORN
+
+
+# total amount of corn per year
+corn_total_exported <- trade_br %>% 
+  mutate(year = as.numeric(format(date, "%Y"))) %>% 
+  filter(product=='corn') %>% 
+  group_by(year) %>% 
+  summarise(tons=sum(tons))
+
+#joining covariates and amount of corn per year. also, keeping data from 1997 to 2019
+dataset <- left_join(covariates,corn_total_exported, by=c('year'='year')) %>% 
+  filter(between(year, 1997, 2019))
+
+
+# manually differencing the time series
+# plot.ts(diff(dataset$tons, differences=1), main='stationary time series')
+# acf(diff(dataset$tons, differences=1), main='correlogram')
+# pacf(diff(dataset$tons, differences=1), main='partial correlogram')
+
+mlr_summary <-  lm(formula = tons ~ .,
+               data = select(dataset, -c(1,10,12,11,8,7,3,13,5,2,4)))
+
+summary(mlr_summary)
+
+#training and testing model performance 
+regressor <- auto.arima(ts(dataset[1:19,14]), xreg = as.matrix(select(dataset,c('gdp_iran','gdp_thailand'))[1:19,]))
+plot(forecast(regressor,xreg = as.matrix(select(dataset,c('gdp_iran','gdp_thailand'))[20:23,])), main = 'corn model performance')
+lines(ts(dataset$tons))
+
+#training the final model
+regressor <- auto.arima(ts(dataset$tons), xreg = as.matrix(select(dataset,c('gdp_iran','gdp_thailand'))))
+
+# creating a different dataset for the years to be predicted
+dataset_pred <- left_join(covariates, corn_total_exported, by=c('year'='year'))
+dataset_pred <- dataset_pred %>% 
+  filter(year>2019)
+
+# deploying the model
+prediction <- forecast(regressor, xreg = as.matrix(select(dataset_pred,c('gdp_iran','gdp_thailand'))))
+
+corn_pred <- setNames(data.frame(prediction$mean),nm = c('corn'))
+
+
+
+# plotting the model
+plot(prediction, 
+     main = 'Brazilian Corn Export from 1997 to 2030', xlab = 'Year', ylab="Tons", xaxt='n')
+axis(1, at = 1:34, labels = 1997:2030)
+grid()
+```
+
+
+```{r echo=FALSE}
+######### SOYBEAN_MEAL
+
+# total amount of soybean_meal per year
+soybean_meal_total_exported <- trade_br %>% 
+  mutate(year = as.numeric(format(date, "%Y"))) %>% 
+  filter(product=='soybean_meal') %>% 
+  group_by(year) %>% 
+  summarise(tons=sum(tons))
+
+#joining covariates and amount of soybean_meal per year. also, keeping data from 1997 to 2019
+dataset <- left_join(covariates,soybean_meal_total_exported, by=c('year'='year')) %>% 
+  filter(between(year, 1997, 2019))
+
+
+# manually differencing the time series
+# plot.ts(diff(dataset$tons, differences=1), main='stationary time series')
+# acf(diff(dataset$tons, differences=1), main='correlogram')
+# pacf(diff(dataset$tons, differences=1), main='partial correlogram')
+
+mlr_summary = lm(formula = tons ~ .,
+               data = select(dataset, -c(1,7,2,11,6,3,4,10,8,12)))
+
+summary(mlr_summary)
+
+#training and testing model performance 
+regressor <- auto.arima(ts(dataset[1:19,14]), xreg = as.matrix(select(dataset,c('gdp_china', 'gdp_vietnam', 'gdp_thailand'))[1:19,]))
+plot(forecast(regressor,xreg = as.matrix(select(dataset,c('gdp_china', 'gdp_vietnam', 'gdp_thailand'))[20:23,])), main = 'soybean meal model performance')
+lines(ts(dataset$tons))
+
+#training the final model
+regressor <- auto.arima(ts(dataset$tons), xreg = as.matrix(select(dataset,c('gdp_china', 'gdp_vietnam', 'gdp_thailand'))))
+
+# creating a different dataset for the years to be predicted
+dataset_pred <- left_join(covariates, soybean_meal_total_exported, by=c('year'='year'))
+dataset_pred <- dataset_pred %>% 
+  filter(year>2019)
+
+# deploying the model
+prediction <- forecast(regressor, xreg = as.matrix(select(dataset_pred,c('gdp_china', 'gdp_vietnam', 'gdp_thailand'))))
+
+soybeanmeal_pred <- setNames(data.frame(prediction$mean),nm = c('soybean meal'))
+
+# plotting the model
+plot(prediction, 
+     main = 'Brazilian Soybean Meal Export from 1997 to 2030', xlab = 'Year', ylab="Tons", xaxt='n')
+axis(1, at = 1:34, labels = 1997:2030)
+grid()
+```
+
+```{r echo=FALSE}
+
+######### soybeans
+
+# total amount of soybeans per year
+soybeans_total_exported <- trade_br %>% 
+  mutate(year = as.numeric(format(date, "%Y"))) %>% 
+  filter(product=='soybeans') %>% 
+  group_by(year) %>% 
+  summarise(tons=sum(tons))
+
+#joining covariates and amount of soybeans per year. also, keeping data from 1997 to 2019
+dataset <- left_join(covariates,soybeans_total_exported, by=c('year'='year')) %>% 
+  filter(between(year, 1997, 2019))
+
+
+# manually differencing the time series
+# plot.ts(diff(dataset$tons, differences=1), main='stationary time series')
+# acf(diff(dataset$tons, differences=1), main='correlogram')
+# pacf(diff(dataset$tons, differences=1), main='partial correlogram')
+
+mlr_summary = lm(formula = tons ~ .,
+               data = select(dataset, -c(1,7,8,11,5,3,10,6,9,12,4)))
+
+summary(mlr_summary)
+
+#training and testing model performance 
+regressor <- auto.arima(ts(dataset[1:19,14]), xreg = as.matrix(select(dataset,c('price_soybeans', 'gdp_vietnam'))[1:19,]))
+plot(forecast(regressor,xreg = as.matrix(select(dataset,c('price_soybeans', 'gdp_vietnam'))[20:23,])), main = 'soybeans model performance')
+lines(ts(dataset$tons))
+
+#training the final model
+regressor <- auto.arima(ts(dataset$tons), xreg = as.matrix(select(dataset,c('price_soybeans', 'gdp_vietnam'))))
+
+# creating a different dataset for the years to be predicted
+dataset_pred <- left_join(covariates, soybeans_total_exported, by=c('year'='year'))
+dataset_pred <- dataset_pred %>% 
+  filter(year>2019)
+
+# deploying the model
+prediction <- forecast(regressor, xreg = as.matrix(select(dataset_pred,c('price_soybeans', 'gdp_vietnam'))))
+
+
+soybeans_pred <- setNames(data.frame(prediction$mean),nm = c('Soybeans'))
+
+# plotting the model
+plot(prediction, 
+     main = 'Brazilian Soybean Export from 1997 to 2030', xlab = 'Year', ylab="Tons", xaxt='n')
+axis(1, at = 1:34, labels = 1997:2030)
+grid()
+
+```
+
+```{r echo=FALSE}
+
+years <- 2020:2030
+
+df_predict <- data.frame(years, corn_pred, soybeanmeal_pred, soybeans_pred) 
+df_predict <- mutate(df_predict, total = apply(df_predict[,2:4],1,sum))
+
+kable(df_predict, caption = 'Forecast: Brazilian Exports from 2020 to 2030 by tons')
+```
+
+### References
+
+Griffith, R., Redding, S., & Reenen, J. V. (2004). Mapping the two faces of R&D: Productivity growth in a panel of OECD industries. Review of economics and statistics, 86(4), 883-895.  
+Pearl, J., & Mackenzie, D. (2018). The book of why: the new science of cause and effect. Basic Books.
+
